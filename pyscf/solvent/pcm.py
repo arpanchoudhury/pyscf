@@ -31,6 +31,7 @@ from pyscf.solvent import ddcosmo
 from pyscf.solvent import _attach_solvent
 from scipy.special import erf
 
+
 @lib.with_doc(_attach_solvent._for_scf.__doc__)
 def pcm_for_scf(mf, solvent_obj=None, dm=None):
     if solvent_obj is None:
@@ -66,10 +67,27 @@ def pcm_for_post_scf(method, solvent_obj=None, dm=None):
 
 pcm_for_tdscf = _attach_solvent._for_tdscf
 
+@lib.with_doc(_attach_solvent._for_mcpdft.__doc__)
+def pcm_for_mcpdft(mc, solvent_obj=None, dm=None):
+    if solvent_obj is None:
+        if isinstance(getattr(mc._scf, 'with_solvent', None), PCM):
+            solvent_obj = mc._scf.with_solvent
+        else:
+            solvent_obj = PCM(mc.mol)
+    return _attach_solvent._for_mcpdft(mc, solvent_obj, dm)
+
+@lib.with_doc(_attach_solvent._for_lpdft.__doc__)
+def pcm_for_lpdft(mc, solvent_obj=None, dm=None):
+    if solvent_obj is None:
+        if isinstance(getattr(mc._scf, 'with_solvent', None), PCM):
+            solvent_obj = mc._scf.with_solvent
+        else:
+            solvent_obj = PCM(mc.mol)
+    return _attach_solvent._for_lpdft(mc, solvent_obj, dm)
 
 # Inject PCM to other methods
 from pyscf import scf
-from pyscf import mcscf
+from pyscf import mcscf, mcpdft
 from pyscf import mp, ci, cc
 from pyscf import tdscf
 scf.hf.SCF.PCM    = scf.hf.SCF.PCM    = pcm_for_scf
@@ -79,6 +97,7 @@ cc.ccsd.CCSD.PCM  = cc.ccsd.CCSD.PCM  = pcm_for_post_scf
 tdscf.rhf.TDBase.PCM = tdscf.rhf.TDBase.PCM = pcm_for_tdscf
 mcscf.casci.CASCI.PCM = mcscf.casci.CASCI.PCM = pcm_for_casci
 mcscf.mc1step.CASSCF.PCM = mcscf.mc1step.CASSCF.PCM = pcm_for_casscf
+mcpdft.MultiStateMCPDFTSolver.PCM = mcpdft.MultiStateMCPDFTSolver.PCM = pcm_for_lpdft
 
 # TABLE II,  J. Chem. Phys. 122, 194110 (2005)
 XI = {
@@ -114,7 +133,10 @@ XI = {
 }
 
 modified_Bondi = radii.VDW.copy()
-modified_Bondi[1] = 1.1/radii.BOHR      # modified version
+
+modified_Bondi[1] = 1.1/radii.BOHR      
+# modified H radius due to Rowland-Taylor 
+
 PI = numpy.pi
 
 def switch_h(x):
@@ -257,6 +279,7 @@ def get_D_S(surface, with_S=True, with_D=False):
     return D, S
 
 
+
 class PCM(lib.StreamObject):
     '''
     PCM Solvent Model
@@ -280,8 +303,9 @@ class PCM(lib.StreamObject):
         Custom van der Waals radii for each element. By default, scaled van der Waals radii
         from `vdw_scale` and `r_probe` are used.
 
-    lebedev_order : int
-        The order of the Lebedev mesh used for the cavity sphere. Default is 29 (302 grids).
+    lebedev_order : int  (unused – kept for API compatibility only)
+        Ignored. The OpenMolcas geodesic tessellation is used instead of
+        Lebedev grids. Use `tsnum` to control surface resolution.
 
     eps : float
         The dielectric constant of the solvent. Default is 78.3553, the dielectric constant
@@ -312,14 +336,19 @@ class PCM(lib.StreamObject):
         `state_id=0` corresponds to the ground state, while `state_id=1` corresponds
         to the first excited state. Default is 0.
 
-    surface_discretization_method : str
-        Specifies the algorithm for the switching function, i.e. how each grid is partitioned
-        among the atoms.
-        Available options are "SWIG" (switching/Gaussian method) and "ISWIG" (improved SWIG).
-        Please refer to the following paper for the definition of both algorithms:
-        Lange, A. W.; Herbert, J. M. A smooth, nonsingular, and faithful discretization scheme
-        for polarizable continuum models: The switching/Gaussian approach. The Journal of
-        Chemical Physics 2010, 133. https://doi.org/10.1063/1.3511297
+    surface_discretization_method : str  (unused, kept for API compatibility only)
+        Ignored. Sphere overlap is handled by exact geometric clipping
+
+    refidx : float
+        The refractive index of the solvent. This is used to compute the optical
+        dielectric constant for non-equilibrium solvation. Default is 1.3328 (water)
+
+    refdm : ndarray
+        The reference ground-state density matrix. 
+        Only required for excited-state SS-CASSCF in non-equilibrium solvation.
+
+    rfroot : int
+        The state used for (fast) solvent response in a SA-CASSCF.
 
     Saved Results:
     --------------
@@ -339,15 +368,15 @@ class PCM(lib.StreamObject):
     - v_grids_n
     '''
 
+
     _keys = {
         'method', 'vdw_scale', 'surface', 'r_probe',
         'mol', 'radii_table', 'lebedev_order',
         'eps', 'max_cycle', 'conv_tol', 'state_id', 'frozen',
         'equilibrium_solvation', 'e', 'v', 'v_grids_n',
         'surface_discretization_method',
-    }
+        'refidx', 'refdm','rfroot'}
 
-    kernel = ddcosmo.DDCOSMO.kernel
 
     def __init__(self, mol):
         self.mol = mol
@@ -378,6 +407,11 @@ class PCM(lib.StreamObject):
         self.v = None
         self._dm = None
 
+        # additional attributes for nonequilibrium solvation
+        self.refdm = None
+        self.refidx = 1.3328 # default is water
+        self.rfroot = None
+
     def dump_flags(self, verbose=None):
         logger.info(self, '******** %s (In testing) ********', self.__class__)
         logger.warn(self, 'PCM is an experimental feature. It is '
@@ -387,7 +421,7 @@ class PCM(lib.StreamObject):
                     self.lebedev_order, gen_grid.LEBEDEV_ORDER[self.lebedev_order])
         logger.info(self, 'eps = %s'          , self.eps)
         logger.info(self, 'frozen = %s'       , self.frozen)
-        #logger.info(self, 'equilibrium_solvation = %s', self.equilibrium_solvation)
+        logger.info(self, 'equilibrium_solvation = %s', self.equilibrium_solvation)
         return self
 
     def to_gpu(self):
@@ -402,6 +436,7 @@ class PCM(lib.StreamObject):
         self.surface = None
         self.v_grids_n = None
         return self
+    
 
     def build(self, ng=None):
         if self.radii_table is None:
@@ -465,6 +500,7 @@ class PCM(lib.StreamObject):
         v_ng = gto.mole.intor_cross(int2c2e, fakemol_nuc, fakemol)
         self.v_grids_n = numpy.dot(atom_charges, v_ng)
 
+
     def _get_vind(self, dms):
         if not self._intermediates:
             self.build()
@@ -486,14 +522,105 @@ class PCM(lib.StreamObject):
         qt = numpy.dot(R.T, vK_1).T
         q_sym = (q + qt)/2.0
 
+
+
         vmat = self._get_vmat(q_sym)
-        epcm = 0.5 * numpy.dot(q_sym[0], v_grids[0])
+        epcm = 0.5 * numpy.dot(q_sym[0], v_grids[0]) 
+
 
         self._intermediates['q'] = q[0]
         self._intermediates['q_sym'] = q_sym[0]
         self._intermediates['v_grids'] = v_grids[0]
         self._intermediates['dm'] = dms
         return epcm, vmat[0]
+
+    def _get_K_opt_R_opt(self):
+        '''
+        Return K_opt and R_opt for the optical dielectric constant epsilon_opt = refidx**2.
+
+        These matrices are NOT stored in build() because refidx is typically
+        set after the HF/ground-state build (it is only needed for nonequilibrium
+        excited-state calculations).  Instead they are computed on demand from
+        the current self.refidx and cached in _intermediates under 'K_opt' and
+        'R_opt'.  The cache is invalidated whenever refidx changes by checking
+        the stored 'refidx_cached' value.
+        '''
+        if not self._intermediates:
+            self.build()
+
+        refidx = self.refidx
+        epsilon_opt = refidx**2
+
+        # Use cached version if refidx hasn't changed
+        if (self._intermediates.get('refidx_cached') == refidx
+                and 'K_opt' in self._intermediates
+                and 'R_opt' in self._intermediates):
+            return self._intermediates['K_opt'], self._intermediates['R_opt']
+
+        D = self._intermediates['D']
+        A = self._intermediates['A']
+        S = self._intermediates['S']
+
+        if epsilon_opt <= 0.0:
+            raise ValueError(
+                'refidx must be set before calling nonequilibrium methods. '
+                'Set mc.with_solvent.refidx = <refractive index> (e.g. 1.3328 for water).')
+        
+        if self.method.upper() in ['C-PCM', 'CPCM']:
+            f_epsilon_opt = (epsilon_opt - 1.0) / epsilon_opt
+            K_opt = S
+            R_opt = -f_epsilon_opt * numpy.eye(S.shape[0])
+        elif self.method.upper() == 'COSMO':
+            f_epsilon_opt = (epsilon_opt - 1.0) / (epsilon_opt + 1.0/2.0)
+            K_opt = S
+            R_opt = -f_epsilon_opt * numpy.eye(S.shape[0])
+        elif self.method.upper() in ['IEF-PCM', 'IEFPCM']:
+            f_epsilon_opt = (epsilon_opt - 1.0)/(epsilon_opt + 1.0) 
+            DA = D*A
+            DAS = numpy.dot(DA, S)
+            K_opt = S - f_epsilon_opt/(2.0*PI) * DAS
+            R_opt = -f_epsilon_opt * (numpy.eye(K_opt.shape[0]) - 1.0/(2.0*PI)*DA)
+
+        else:
+            raise NotImplementedError(
+                f'K_opt/R_opt in nonequilibrium not yet implemented for {self.method}.')
+
+
+        self._intermediates['K_opt']        = K_opt
+        self._intermediates['R_opt']        = R_opt
+        self._intermediates['refidx_cached'] = refidx
+        return K_opt, R_opt
+
+    def _get_vind_pekar(self, dms):
+        '''
+        Calculate only the fast component of 
+        charges based on optical dielectric constant 
+        '''
+        if not self._intermediates:
+            self.build()
+
+        nao = dms.shape[-1]
+        dms = dms.reshape(-1,nao,nao)
+        if dms.shape[0] == 2:
+            dms = (dms[0] + dms[1]).reshape(-1,nao,nao)
+
+        K_opt, R_opt = self._get_K_opt_R_opt()   # lazy — uses current refidx
+        v_grids_e = self._get_v(dms)
+        v_grids = self.v_grids_n - v_grids_e
+
+
+        b = numpy.dot(R_opt, v_grids.T)
+        q = numpy.linalg.solve(K_opt, b).T
+
+
+        vK_1 = numpy.linalg.solve(K_opt.T, v_grids.T)
+        qt = numpy.dot(R_opt.T, vK_1).T
+        q_sym = (q + qt)/2.0
+
+
+        return q_sym[0], v_grids[0]
+
+
 
     def _get_v(self, dms):
         '''
@@ -518,7 +645,7 @@ class PCM(lib.StreamObject):
                 v_grids_e[i,p0:p1] = numpy.einsum('ijL,ij->L',v_nj, dms[i])
 
         return v_grids_e
-
+    
     def _get_vmat(self, q):
         mol = self.mol
         nao = mol.nao
@@ -540,6 +667,152 @@ class PCM(lib.StreamObject):
             for i in range(nset):
                 vmat[i] += -numpy.einsum('ijL,L->ij', v_nj, q[i,p0:p1])
         return vmat
+
+
+    def kernel(self, dm): 
+        '''A single shot solvent effects for given density matrix.
+        '''
+        
+        self._dm = dm
+
+        if self.state_id==0:
+            # -----------------------------------------------------
+            # Ground state equilibrium solvation
+            # -----------------------------------------------------
+            if getattr(self, 'refdm', None) is not None:
+                logger.warn(self, ''' Reference density (refdm) found in %s, without excited-state index.''', self.__class__.__name__)
+
+            epcm, vmat = self._get_vind(dm)
+            logger.info(self, 'Ground state equilibrium E(pol) = %.15g', epcm)
+            return epcm, vmat
+
+        elif not self.equilibrium_solvation and isinstance(self.state_id, int) and getattr(self, 'rfroot') is None:
+            # -----------------------------------------------------
+            # State-specific excited state nonequilibrium solvation
+            # -----------------------------------------------------
+
+
+            if getattr(self, 'refdm', None) is None:
+                raise ValueError(
+                    f'set mc.with_solvent.refdm = <ground-state density matrix> ,\
+                    \n for a state-specific excited state nonequilibrium calculation')
+                
+            _q_ref_fast, _vgrid_ref = self._get_vind_pekar(self.refdm)
+            self._get_vind(self.refdm)    
+            _q_ref = self._intermediates['q_sym'] 
+            _q_ref_slow = _q_ref - _q_ref_fast                      
+
+            _q_fast, _vgrid = self._get_vind_pekar(dm)              
+            _q_neq = _q_ref_slow + _q_fast                          
+
+            vmat = self._get_vmat(_q_neq)[0]
+
+            epcm_fast = 0.5 * numpy.dot(_q_fast, _vgrid)
+            epcm_slow  = numpy.dot((_vgrid - 0.5 * _vgrid_ref), _q_ref_slow)
+            epcm = epcm_fast + epcm_slow
+
+            logger.info(self, 'Excited state %d nonequilibrium E(pol) = %.15g',
+                        self.state_id, epcm)
+
+            return epcm, vmat
+        
+        elif (not self.equilibrium_solvation and 
+              self.state_id is None): 
+            # ------------------------------------------
+            # State-averaged nonequilibrium solvation
+            # ------------------------------------------
+
+            if getattr(self, 'rfroot', None) is None:
+                raise RuntimeError('State-averaged CASSCF with solvent requires '
+                           'with_solvent.rfroot to be set')
+            phi = self.rfroot
+
+            _sa_dm    = dm[-1]
+            state_dms = dm[:-1]
+            n_states  = len(state_dms)
+
+           
+            if phi >= n_states:
+                raise ValueError(
+                    f'rfroot={phi} out of range for {n_states} SA states.')
+
+            
+            # slow charges from state 0 
+            self._get_vind(state_dms[0]) 
+            _q0_total = self._intermediates['q_sym']
+            _vgrid0 = self._intermediates['v_grids']
+            _q0_fast, _ = self._get_vind_pekar(state_dms[0])
+            _q0_slow = _q0_total - _q0_fast   
+            
+
+            # fast charges from state rfroot 
+            _qphi_fast, _ = self._get_vind_pekar(state_dms[phi])
+
+
+            slow_self = -0.5 * numpy.dot(_vgrid0, _q0_slow)
+
+            logger.info(self, 'Nonequilibrium SA-CASSCF: slow charges from ground state,\n'
+                              '                          fast charges from state %d', phi)
+
+            # reaction field from total NEQ charge = Q^slow(0) + Q^fast(phi)
+            _q_neq  = _q0_slow + _qphi_fast 
+
+            vmat = self._get_vmat(_q_neq)[0]
+
+            # per-state free energies
+            epcms = []
+            for i, d in enumerate(state_dms):
+
+                if i == 0:
+                    # G_0 
+                    epcm_i = 0.5 * numpy.dot(_vgrid0, _q0_total)
+                    logger.info(self, 'Ground state equilibrium E(pol) =  %.15g', epcm_i)
+
+
+                else:
+                    # G_k : general formula for state > 0
+                    _qk_fast, _vgrid_k = self._get_vind_pekar(state_dms[phi])                 
+                    fast_self_k  = 0.5 * numpy.dot(_vgrid_k, _qk_fast)               
+
+                    slow_inter_k = numpy.dot(_vgrid_k, _q0_slow)                     
+
+                    epcm_i = fast_self_k + slow_inter_k + slow_self
+                    
+                    logger.info(self, 'Excited state %d nonequilibrium E(pol) = %.15g \n', i, epcm_i)
+                epcms.append(epcm_i)
+
+            return epcms, vmat
+ 
+
+        elif (self.equilibrium_solvation and 
+              self.state_id is None):
+            # ------------------------------------------
+            # SA-CASSCF equilibrium solvation
+            # ------------------------------------------
+            
+
+            if getattr(self, 'rfroot', None) is None:
+                raise RuntimeError('State-averaged CASSCF with solvent requires '
+                           'with_solvent.rfroot to be set')
+            
+            state_dms = dm[:-1]
+            phi = self.rfroot
+ 
+            # Compute equilibrium charges from the selected state
+            _, vmat = self._get_vind(state_dms[phi]) 
+ 
+            # Per-state free energies:
+            epcms = []
+            for i, d in enumerate(state_dms):
+                epcm_k, _ = self._get_vind(d) 
+                epcms.append(epcm_k)
+                
+                logger.info(self, 'State %d equilibrium E(pol) = %.15g', i, epcm_k)
+ 
+            return epcms, vmat
+
+
+
 
     def nuc_grad_method(self, grad_method):
         raise DeprecationWarning('Use the make_grad_object function from '

@@ -16,6 +16,7 @@ from pyscf.solvent import ddcosmo
 from pyscf.solvent import pcm
 from pyscf.solvent import smd
 
+
 def ddCOSMO(method_or_mol, solvent_obj=None, dm=None):
     '''Initialize ddCOSMO model.
 
@@ -139,7 +140,7 @@ def PCM(method_or_mol, solvent_obj=None, dm=None):
     >>> mc.kernel()
     '''
     from pyscf import gto
-    from pyscf import scf, mcscf
+    from pyscf import scf, mcscf, mcpdft
     from pyscf import tdscf
 
     if isinstance(method_or_mol, gto.mole.Mole):
@@ -148,11 +149,18 @@ def PCM(method_or_mol, solvent_obj=None, dm=None):
     method = method_or_mol
     if isinstance(method, scf.hf.SCF):
         return pcm.pcm_for_scf(method, solvent_obj, dm)
+    
+    elif hasattr(method, 'otfnal') and not isinstance(method, mcpdft.MultiStateMCPDFTSolver):
+        return pcm.pcm_for_mcpdft(method, solvent_obj, dm)
+    elif hasattr(method, 'get_lpdft_ham') and isinstance(method, mcpdft.MultiStateMCPDFTSolver):
+        return pcm.pcm_for_lpdft(method, solvent_obj, dm)
+        
     elif isinstance(method, mcscf.casci.CASBase):
         if isinstance(method, mcscf.mc1step.CASSCF):
             return pcm.pcm_for_casscf(method, solvent_obj, dm)
         elif isinstance(method, mcscf.casci.CASCI):
             return pcm.pcm_for_casci(method, solvent_obj, dm)
+        
     elif isinstance(method, tdscf.rhf.TDBase):
         return pcm.pcm_for_tdscf(method, solvent_obj, dm)
     elif hasattr(method, '_scf'):
@@ -162,7 +170,7 @@ def PCM(method_or_mol, solvent_obj=None, dm=None):
 PCM = PCM
 
 def SMD(method_or_mol, solvent_obj=None, dm=None):
-    '''Initialize PCM model.
+    '''Initialize SMD model.
 
     Examples:
 
@@ -173,13 +181,26 @@ def SMD(method_or_mol, solvent_obj=None, dm=None):
     >>> mc.kernel()
     '''
     from pyscf import gto
-    from pyscf import scf
+    from pyscf import scf, mcscf, mcpdft
+
+    if isinstance(method_or_mol, gto.mole.Mole):
+        return smd.SMD(method_or_mol)
 
     method = method_or_mol
-    if isinstance(method, gto.mole.Mole):
-        return smd.SMD(method)
-    elif isinstance(method, scf.hf.SCF):
+    if isinstance(method, scf.hf.SCF):
         return smd.smd_for_scf(method, solvent_obj, dm)
+    
+    elif hasattr(method, 'otfnal') and not isinstance(method, mcpdft.MultiStateMCPDFTSolver):
+        return smd.smd_for_mcpdft(method, solvent_obj, dm)
+    elif hasattr(method, 'get_lpdft_ham') and isinstance(method, mcpdft.MultiStateMCPDFTSolver):
+        return smd.smd_for_lpdft(method, solvent_obj, dm)
+    
+    elif isinstance(method, mcscf.casci.CASBase):
+        if isinstance(method, mcscf.mc1step.CASSCF):
+            return smd.smd_for_casscf(method, solvent_obj, dm)
+        elif isinstance(method, mcscf.casci.CASCI):
+            return smd.smd_for_casci(method, solvent_obj, dm)   
+
     raise RuntimeError(f'SMD for {method} not available')
 
 SMD = SMD
