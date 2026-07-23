@@ -287,6 +287,7 @@ class MCPDFTWithSolvent(_Solvation):
         if isinstance(self.fcisolver, StateAverageFCISolver):
             mc_obj = self._mc_class(self._scf, self.ncas, self.nelecas).state_average_(self.weights)
         else:
+            print('mc_obj is not state_average')
             mc_obj = self._mc_class(self._scf, self.ncas, self.nelecas)
 
 
@@ -349,6 +350,7 @@ class MCPDFTWithSolvent(_Solvation):
             e_states = self.e_states
 
             g_states = []
+
             for i, ei in enumerate(e_states):
                 g_states.append(ei+self.with_solvent.e[i])
                 logger.note(self,'  State %d   E(MC-PDFT+solvent) = %.15g',
@@ -371,8 +373,10 @@ class MCPDFTWithSolvent(_Solvation):
         else:  # nroots==1 not StateAverage class
             self.e_tot, self.e_ot = epdft[0]
             e_states = [self.e_tot]
+
             logger.note(self,'  State %d   E(MC-PDFT+solvent) = %.15g',
-                            len(e_states)-1, self.e_tot+self.with_solvent.e)
+                        len(e_states)-1, self.e_tot+self.with_solvent.e)
+                
             # quantity update
             self.e_tot = self.e_tot + self.with_solvent.e
             e_states = [self.e_tot]
@@ -412,11 +416,7 @@ def _for_casscf(mc, solvent_obj, dm=None):
 
     if isinstance(mc.fcisolver, StateAverageFCISolver):
         solvent_obj.state_id = None
-
-    '''if isinstance(mc.fcisolver, StateAverageFCISolver) and getattr(solvent_obj, 'rfroot', None) is None:
-        raise RuntimeError('State-averaged CASSCF with solvent requires '
-                           'with_solvent.rfroot to be set')'''
-
+        
 
     if dm is not None:
         solvent_obj.e, solvent_obj.v = solvent_obj.kernel(dm)
@@ -433,6 +433,7 @@ class CASSCFWithSolvent(_Solvation):
         self.__dict__.update(mc.__dict__)
         self.with_solvent = solvent
         self._e_tot_without_solvent = 0
+        self._e_states_corrected = 0
 
 
     def undo_solvent(self):
@@ -540,7 +541,18 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
 
         return hcore
 
- 
+    
+    def _finalize(self):
+        from pyscf.mcscf.addons import StateAverageFCISolver
+        if isinstance(self.fcisolver, StateAverageFCISolver):
+            try:
+                self.e_states = self._e_states_corrected
+            except AttributeError as e:
+                self.fcisolver.e_states = self._e_states_corrected
+                assert (self.e_states is self._e_states_corrected), str(e)
+        super()._finalize()
+        return self
+    
     def casci(self, mo_coeff, ci0=None, eris=None, verbose=None, envs=None):
         log = logger.new_logger(self, verbose)
         log.debug('Running CASCI with solvent. Note the total energy '
@@ -575,7 +587,6 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                 dm.append(_sa_1rdm)
 
             _e_states = self.e_states.copy()
-            self._final_e_states = _e_states.copy()
             self._final_state_dms = dm.copy()
 
 
@@ -595,41 +606,25 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
 
                 if not with_solvent.frozen:
                     e_solv, v_solv = with_solvent.kernel(dm) 
-                                                             
-                                                          
+                                                                                                                       
                 else:
                     e_solv =  with_solvent.e
                 
                 for i in range(len(_e_states)):
                     _e_states[i] = _e_states[i] - edups[i] + e_solv[i]
-                
-
+        
                 e_tot = numpy.einsum('i,i->', _e_states, self.weights) 
 
-                if with_solvent.__class__.__name__ == 'SMD':
-                    temp_e_cds = with_solvent.get_cds()
+                self._e_states_corrected = _e_states.copy()
 
-                    if isinstance(temp_e_cds, numpy.ndarray):
-                        temp_e_cds = temp_e_cds[0]
-
-                    log.info("\n********************** (CASSCF+solvent) ************************")
-                    log.info('State-averaged E(CASSCF+solvent) = %.15g \n'
-                        'Ground state E(CDS) = %.15g \n'
-                        ,e_tot, temp_e_cds)
-                    log.info("Energy for each state:")
-                    for i, ei in enumerate(_e_states):
-                        log.info('  State %d weight %g  E(CASSCF+solvent) = %.15g',
-                            i, self.weights[i], ei)
-                    log.info("****************************  *  *******************************\n")
-                else:
-                    log.info("\n********************** (CASSCF+solvent) ************************")
-                    log.info('State-averaged E(CASSCF+solvent) = %.15g \n'
-                        ,e_tot)
-                    log.info("Energy for each state:")
-                    for i, ei in enumerate(_e_states):
-                        log.info('  State %d weight %g  E(CASSCF+solvent) = %.15g',
-                            i, self.weights[i], ei)
-                    log.info("****************************  *  *******************************\n")
+                log.info("\n********************** (CASSCF+solvent) ************************")
+                log.info('State-averaged E(CASSCF+solvent) = %.15g \n'
+                    ,e_tot)
+                log.info("Energy for each state:")
+                for i, ei in enumerate(_e_states):
+                    log.info('  State %d weight %g  E(CASSCF+solvent) = %.15g',
+                        i, self.weights[i], ei)
+                log.info("****************************  *  *******************************\n")
 
         else:
             with_solvent = self.with_solvent
@@ -647,29 +642,13 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                 else:
                     e_solv =  with_solvent.e
 
-                print('e_tot, edup, e_solv', e_tot, edup, e_solv)
                 e_tot = e_tot - edup + e_solv
 
-            
-
-                if with_solvent.__class__.__name__ == 'SMD':
-                    temp_e_cds = with_solvent.get_cds()
-
-                    if isinstance(temp_e_cds, numpy.ndarray):
-                        temp_e_cds = temp_e_cds[0]
-
-
-                    log.info("\n********************** (CASSCF+solvent) ************************")
-                    log.info('E(CASSCF+solvent) = %.15g \n'
-                            'Ground state E(CDS) = %.15g '
-                            ,e_tot, temp_e_cds)
-                    log.info("****************************  *  *******************************\n")
                 
-                else:
-                    log.info("\n********************** (CASSCF+solvent) ************************")
-                    log.info('E(CASSCF+solvent) = %.15g \n'
-                            ,e_tot)
-                    log.info("****************************  *  *******************************\n")
+                log.info("\n********************** (CASSCF+solvent) ************************")
+                log.info('E(CASSCF+solvent) = %.15g \n'
+                        ,e_tot)
+                log.info("****************************  *  *******************************\n")
                 
 
         # Update solvent effects for next iteration if needed
@@ -723,7 +702,7 @@ class LPDFTWithSolvent(_Solvation):
         self.with_solvent = solvent
 
         # NEQ diagonalization loop settings (Step-II of kernel()) — user-overridable
-        self.lpdft_max_iter = getattr(mc, 'lpdft_max_iter', 25)
+        self.lpdft_max_iter = getattr(mc, 'lpdft_max_iter', 50)
         self.lpdft_conv_tol = getattr(mc, 'lpdft_conv_tol', 1e-7)
 
 
@@ -782,7 +761,7 @@ class LPDFTWithSolvent(_Solvation):
 
 
     def make_lpdft_ham_(self, mo_coeff=None, ci=None, ot=None, 
-                        neq=False,q_slow=None,v_grids_0=None):
+                        vmat=None):
         """Compute the L-PDFT Hamiltonian
 
         Args:
@@ -794,6 +773,10 @@ class LPDFTWithSolvent(_Solvation):
                 CI vectors should be from a converged CASSCF/CASCI calculation
 
             ot : an instance of on-top functional class - see otfnal.py
+
+            vmat : ndarray of shape (nao, nao) 
+                Solvent potential matrix 
+                
 
         Returns:
             lpdft_ham : ndarray of shape (nroots, nroots) or (nirreps, nroots, nroots)
@@ -831,7 +814,7 @@ class LPDFTWithSolvent(_Solvation):
 
         ncas = self.ncas
 
-        casdm1s_0, casdm2_0 = self.get_casdm12_0(ci=ci)
+        casdm1s_0, casdm2_0 = self.get_casdm12_0(ci=ci) # SA density?
         
 
         self.veff1, self.veff2, E_ot = self.get_pdft_veff(
@@ -846,7 +829,7 @@ class LPDFTWithSolvent(_Solvation):
 
         # This is all standard procedure for generating the hamiltonian in PySCF
         h1, h0 = self.get_h1lpdft(E_ot, casdm1s_0, casdm2_0, hyb=1.0 - cas_hyb, mo_coeff=mo_coeff,
-                                  neq=neq, q_slow=q_slow, v_grids_0=v_grids_0) 
+                                  vmat=vmat) 
         h2 = self.get_h2lpdft()
         h2eff = direct_spin1.absorb_h1e(h1, h2, ncas, self.nelecas, 0.5)
 
@@ -890,9 +873,6 @@ class LPDFTWithSolvent(_Solvation):
         veff1=None,
         veff2=None,
         mo_coeff=None,
-        neq=False,
-        q_slow=None,
-        v_grids_0=None,
     ):
         """Compute h_const for the L-PDFT Hamiltonian
 
@@ -975,127 +955,65 @@ class LPDFTWithSolvent(_Solvation):
         # h_nuc + E_ot - 1/2 g_pqrs D_pq D_rs - V_pq D_pq - 1/2 v_pqrs d_pqrs
         energy_core = hyb * self.energy_nuc() + E_ot - e_veff1_j - e_veff2
 
-        # solvent contribution to h_const
-        with_solvent = self.with_solvent
-        if not with_solvent._intermediates:
-            with_solvent.build()
-
-        
-        if neq:
-            K_sym = self._get_K_sym_opt()   # optical dielectric 
-        else:
-            # static dielectric 
-            if 'K_sym' not in with_solvent._intermediates:
-                K = with_solvent._intermediates['K']
-                R = with_solvent._intermediates['R']
-                K_inv_R = numpy.linalg.solve(K, R)
-                with_solvent._intermediates['K_sym'] = 0.5 * (K_inv_R + K_inv_R.T)
-            K_sym = with_solvent._intermediates['K_sym']
-
-        vn = with_solvent.v_grids_n   
-        v0 = with_solvent._get_v(dm1[None, :])[0]    
-
-        # TERM1 = +0.5 * Kmm' V_N V_N'
-        term1 = 0.5 * numpy.einsum('m,mn,n->', vn, K_sym, vn)
-
-        # TERM2 = -0.5 * Kmm' v0_m v0_m'
-        term2 = -0.5 * numpy.einsum('m,mn,n->', v0, K_sym, v0)
-
-        energy_core += term1 + term2
-
-        # NEQ slow charge terms
-        if neq and q_slow is not None and v_grids_0 is not None:
-            term_slow_nuc  =  numpy.dot(vn, q_slow)
-            term_slow_self = -0.5 * numpy.dot(v_grids_0, q_slow)
-            energy_core += term_slow_nuc + term_slow_self
 
         return energy_core
 
     def get_lpdft_hcore_only(self, casdm1s_0, hyb=1.0, mo_coeff=None,
-                          ncore=None, ncas=None, neq=False, q_slow=None):
+                          ncore=None, ncas=None, vmat=None):
         """
         Returns the lpdft hcore AO integrals weighted by the
         hybridization factor. Excludes the MC-SCF (wfn) component.
 
         Kwargs:
-        neq : bool
-            If True, use optical dielectric K_sym_opt and add slow charge term.
-            If False, use static dielectric K_sym.
+        vmat : ndarray of shape (nao, nao) 
+                Solvent potential matrix 
 
-        q_slow : ndarray of shape (ngrids,) or None
-            Slow PCM charges from ground state. Only used when neq=True.
         """
+        if vmat is None:
+            vmat = self.with_solvent.v
+
         from pyscf.mcpdft import _dms
 
         dm1s = _dms.casdm1s_to_dm1s(self, casdm1s=casdm1s_0, mo_coeff=mo_coeff,
                                     ncore=ncore, ncas=ncas)
         dm1 = dm1s[0] + dm1s[1]
         v_j = self._scf.get_j(dm=dm1)
-        h_eff = hyb * self.get_hcore() + self.veff1 + hyb * v_j
-
-        # solvent contribution to hcore
-        with_solvent = self.with_solvent
-        if not with_solvent._intermediates:
-            with_solvent.build()
+        h_eff = hyb * self._scf.get_hcore() + self.veff1 + hyb * v_j 
 
 
-        if neq:
-            K_sym = self._get_K_sym_opt()  
-        else:
-            if 'K_sym' not in with_solvent._intermediates:
-                K = with_solvent._intermediates['K']
-                R = with_solvent._intermediates['R']
-                K_inv_R = numpy.linalg.solve(K, R)
-                with_solvent._intermediates['K_sym'] = 0.5 * (K_inv_R + K_inv_R.T)
-            K_sym = with_solvent._intermediates['K_sym']
-
-        v0 = with_solvent._get_v(dm1[None, :])[0]   
-        vn = with_solvent.v_grids_n                   
-        v_grids = vn - v0                             
-
-        f_m = -numpy.dot(K_sym, v_grids)
-
-        if neq and q_slow is not None:
-            f_m -= q_slow
-
-
-        from pyscf import gto, df
-        if 'pcm_hcore_integrals' not in with_solvent._intermediates:
-            mol = self.mol
-            grid_coords = with_solvent.surface['grid_coords']
-            exponents   = with_solvent.surface['charge_exp']
-            nao = mol.nao_nr()
-            ngrids = grid_coords.shape[0]
-        
-            int3c2e = mol._add_suffix('int3c2e')
-            cintopt = gto.moleintor.make_cintopt(
-                mol._atm, mol._bas, mol._env, int3c2e)
-        
-            # build (nao, nao, ngrids) integral array
-            max_memory = with_solvent.max_memory - lib.current_memory()[0]
-            blksize = int(max(max_memory*0.9e6/8/nao**2, 400))
-        
-            v_nj_full = numpy.zeros((nao, nao, ngrids))
-            for p0, p1 in lib.prange(0, ngrids, blksize):
-                fakemol = gto.fakemol_for_charges(
-                    grid_coords[p0:p1], expnt=exponents[p0:p1]**2)
-                fakemol.cart = mol.cart
-                v_nj = df.incore.aux_e2(
-                    mol, fakemol, intor=int3c2e,
-                    aosym='s1', cintopt=cintopt)  
-                v_nj_full[:, :, p0:p1] = v_nj
-        
-            with_solvent._intermediates['pcm_hcore_integrals'] = v_nj_full
-
-        v_nj_full = with_solvent._intermediates['pcm_hcore_integrals']
-
-        pcm_h1 = numpy.einsum('ijm,m->ij', v_nj_full, f_m)
-        h_eff += pcm_h1
+        h_eff += vmat  # add the solvent potential
         return h_eff
+    
+    def get_lpdft_hcore(self, casdm1s_0=None, mo_coeff=None, ncore=None, ncas=None, vmat=None):
+        """
+        Returns the full lpdft hcore AO integrals. Includes the MC-SCF
+        (wfn) component for hybrid functionals.
 
+        Kwargs:
+        vmat : ndarray of shape (nao, nao) 
+                Solvent potential matrix 
+        """
+
+        if vmat is None:
+            vmat = self.with_solvent.v
+
+
+        if casdm1s_0 is None:
+            casdm1s_0 = self.get_casdm12_0()[0]
+
+        spin = abs(self.nelecas[0] - self.nelecas[1])
+        cas_hyb = self.otfnal._numint.rsh_and_hybrid_coeff(self.otfnal.otxc, spin=spin)[
+            2
+        ]
+        hyb = 1.0 - cas_hyb[0]
+
+        return cas_hyb[0] * self._scf.get_hcore() + self.get_lpdft_hcore_only(
+            casdm1s_0, hyb=hyb, mo_coeff=mo_coeff, ncore=ncore, ncas=ncas, vmat=vmat
+        )
+    
     def transformed_h1e_for_cas(
         self, E_ot, casdm1s_0, casdm2_0, hyb=1.0, mo_coeff=None, ncas=None, ncore=None,
-        neq=False, q_slow=None, v_grids_0=None,
+        vmat=None,
     ):
         """Compute the CAS one-particle L-PDFT Hamiltonian
 
@@ -1126,16 +1044,9 @@ class LPDFTWithSolvent(_Solvation):
             ncore : int
                 Number of core molecular orbitals
 
-            neq : bool
-                If True, use optical dielectric K_sym_opt.
-                If False, use static dielectric K_sym.
+            vmat : ndarray of shape (nao, nao) 
+                The solvent potential matrix. 
 
-            q_slow : ndarray of shape (ngrids,) or None
-                Slow PCM charges from ground state. Only used when neq=True.
-
-            v_grids_0 : ndarray of shape (ngrids,) or None
-                Total molecular ESP at grid points from ground state.
-                Only used when neq=True.
 
 
         Returns:
@@ -1157,11 +1068,10 @@ class LPDFTWithSolvent(_Solvation):
         # h_pq + V_pq + J_pq all in AO integrals
         hcore_eff = self.get_lpdft_hcore_only(casdm1s_0, hyb=hyb, mo_coeff=mo_coeff,
                                         ncore=ncore, ncas=ncas,
-                                        neq=neq, q_slow=q_slow)
+                                        vmat=vmat)
         energy_core = self.get_lpdft_hconst(E_ot, casdm1s_0, casdm2_0, hyb,
                                       mo_coeff=mo_coeff, ncore=ncore,
-                                      ncas=ncas,
-                                      neq=neq,q_slow=q_slow,v_grids_0=v_grids_0)
+                                      ncas=ncas)
 
         if mo_core.size != 0:
             core_dm = numpy.dot(mo_core, mo_core.conj().T) * 2
@@ -1176,10 +1086,10 @@ class LPDFTWithSolvent(_Solvation):
         return h1eff, energy_core
     
     def get_h1lpdft(self, E_ot, casdm1s_0, casdm2_0, hyb=1.0, mo_coeff=None,
-                    neq=False, q_slow=None, v_grids_0=None):
+                    vmat=None):
         return self.transformed_h1e_for_cas(
             E_ot, casdm1s_0, casdm2_0, hyb=hyb, mo_coeff=mo_coeff,
-            neq=neq, q_slow=q_slow, v_grids_0=v_grids_0)
+            vmat=vmat)
     
     def _get_K_sym_opt(self):
         """Build K^opt and
@@ -1191,6 +1101,22 @@ class LPDFTWithSolvent(_Solvation):
             with_solvent._intermediates['K_sym_opt'] = 0.5 * (K_inv_R_opt + K_inv_R_opt.T)
         return with_solvent._intermediates['K_sym_opt']
 
+    def get_solv_dms(self):
+        from pyscf.mcscf.addons import StateAverageFCISolver
+        _sa_casdms = StateAverageFCISolver.states_make_rdm1(self.fcisolver, self.ci, self.ncas, self.nelecas)
+
+        dm = []
+        for _sa_casdm in _sa_casdms:
+            mocore = self.mo_coeff[:,:self.ncore]
+            mocas = self.mo_coeff[:,self.ncore:self.ncore+self.ncas]
+            _sa_1rdm = numpy.dot(mocore, mocore.conj().T) * 2
+            _sa_1rdm = _sa_1rdm + reduce(numpy.dot, (mocas, _sa_casdm, mocas.conj().T))
+            dm.append(_sa_1rdm)
+
+        sa_dm = sum([w * d for w, d in zip(self.weights,dm)]) 
+        dm.append(sa_dm) # add the sa_dm to the end of the list for later use in solvent.kernel()
+        return dm
+        
     def kernel(self, mo_coeff=None, ci0=None, ot=None, verbose=None, dump_chk=True):
 
         from pyscf.mcpdft import _dms
@@ -1212,57 +1138,25 @@ class LPDFTWithSolvent(_Solvation):
         ci_mcscf = [c.copy() for c in self.ci]
 
 
-    
-        # Step-I: single diagonalization (to get initial D^(0))
-        self.lpdft_ham = self.make_lpdft_ham_(ot=ot, ci=ci_mcscf)
-
-        if hasattr(self, "_irrep_slices"):
-            e_states, si_pdft = zip(*map(self._eig_si, self.lpdft_ham))
-            e_states = numpy.concatenate(e_states)
-            si_pdft  = linalg.block_diag(*si_pdft)
-        else:
-            e_states, si_pdft = self._eig_si(self.lpdft_ham)
-
-        self.e_states = e_states
-        self.si_pdft  = si_pdft
-        self.e_tot    = numpy.dot(e_states, self.weights)
-        self.ci = list(numpy.tensordot(si_pdft.T, numpy.asarray(ci_mcscf), axes=1))
         
         with_solvent = self.with_solvent
-        if with_solvent.equilibrium_solvation:
-            self._finalize_lin()
-            return (self.e_tot, self.e_mcscf, self.e_cas,
-                    self.ci, self.mo_coeff, self.mo_energy)
-
-
-
-        # Step-II: NEQ diagonalization 
-
+        dms = self.get_solv_dms()
+        _, vmat = with_solvent.kernel(dms)
+        with_solvent.v = vmat
+        
         lpdft_conv = False
         _iter = 0
         e_tot_prev = 0.0
         
-        # recompute Q^slow(0) and V^(0) from L-PDFT ground state density until convergence
-        log.info("\nStarting Nonequilibrium L-PDFT+solvent iterations...")
+        
+        # recompute solvent potential from L-PDFT states densities until convergence
+        log.info("\nStarting L-PDFT+solvent iterations...")
         while not lpdft_conv and _iter < self.lpdft_max_iter:
 
-            casdm1s_gs = _dms.make_one_casdm1s(self, ci=self.ci, state=0)
-            dm1s_gs = _dms.casdm1s_to_dm1s(self, casdm1s=casdm1s_gs,
-                                            mo_coeff=self.mo_coeff)
-            dm1_gs = dm1s_gs[0] + dm1s_gs[1]
-
-            with_solvent._get_vind(dm1_gs) 
-            q0_total = with_solvent._intermediates['q_sym']
-            v_grids_0 = with_solvent._intermediates['v_grids']
-
-            q0_fast, _ = with_solvent._get_vind_pekar(dm1_gs)
-
-            q_slow    = (q0_total - q0_fast)
-
+            
 
             self.lpdft_ham = self.make_lpdft_ham_(
-                ot=ot, ci=ci_mcscf, neq=True,
-                q_slow=q_slow, v_grids_0=v_grids_0)
+                ot=ot, ci=ci_mcscf, vmat=vmat)  
 
             if hasattr(self, "_irrep_slices"):
                 e_states, si_pdft = zip(*map(self._eig_si, self.lpdft_ham))
@@ -1271,28 +1165,45 @@ class LPDFTWithSolvent(_Solvation):
             else:
                 e_states, si_pdft = self._eig_si(self.lpdft_ham)
 
-            # final quantity updates
-            self.e_states = e_states
+
+                        
             self.si_pdft  = si_pdft
-            self.e_tot    = numpy.dot(e_states, self.weights)
             self.ci = list(numpy.tensordot(si_pdft.T, numpy.asarray(ci_mcscf), axes=1))
 
-            
+
+            # correct the free energies
+            dm = self.get_solv_dms()
+            edups = []
+            for i in range(len(e_states)):
+                edup = numpy.einsum('ij,ji->', vmat, dm[i])
+                edups.append(edup)
         
+            e_solv, v_solv = with_solvent.kernel(dm) 
+            for i in range(len(e_states)):
+                e_states[i] = e_states[i] - edups[i] + e_solv[i]
+
+
+            self.e_states = e_states
+            self.e_tot    = numpy.dot(e_states, self.weights)
+
+
             lpdft_dE =abs(self.e_tot - e_tot_prev)
             _iter += 1
-            log.info(f"Iteration {_iter}: dE = {lpdft_dE}")
+            log.info(f"** Solvent self-consistent cycle {_iter}:\n dE = {lpdft_dE}")
             self._finalize_lin()
 
             if (_iter >= self.lpdft_max_iter) and (lpdft_dE > self.lpdft_conv_tol):
-                log.info("Nonequilibrium L-PDFT+solvent not converged within the maximum number of iterations.")
+                log.info("self-consistent L-PDFT+solvent not converged within the maximum number of iterations \n"
+                "Increase mc.lpdft_max_iter.")
 
             if (lpdft_dE <= self.lpdft_conv_tol):
                 lpdft_conv = True
-                log.info("Nonequilibrium L-PDFT+solvent converged.")
+                log.info("self-consistent L-PDFT+solvent converged")
                 
 
             e_tot_prev = self.e_tot
+            vmat = v_solv
+            with_solvent.v = v_solv
 
         return (self.e_tot, self.e_mcscf, self.e_cas,
                 self.ci, self.mo_coeff, self.mo_energy)
@@ -1344,23 +1255,15 @@ def _for_casci(mc, solvent_obj, dm=None):
         dm : if given, solvent does not respond to the change of density
             matrix. A frozen ddCOSMO potential is added to the results.
     '''
-    #print('isinstance of mc before attach solvent:', isinstance(mc, _Solvation))
     if isinstance(mc, _Solvation):
         mc.with_solvent = solvent_obj
         mc.dm = dm
-        print('mc.dm in attach solvent=', len(mc.dm))
         return mc
-    #print('dm=', dm)
-    #print('solvent_obj.e before attach solvent:', solvent_obj.e)
-    #print('solvent_obj.v before attach solvent:', solvent_obj.v)
-    if dm is not None:
-        solvent_obj.frozen = True
-        if isinstance(dm, list):
-            solvent_obj.e, solvent_obj.v = solvent_obj.kernel(dm, state_id='sa_casscf', es_method=solvent_obj.es_method, refdm=solvent_obj.refdm)
-        else:
-            solvent_obj.e, solvent_obj.v = solvent_obj.kernel(dm, es_method=solvent_obj.es_method, refdm=solvent_obj.refdm)
 
-    #print('solvent_obj.e before attach solvent:', solvent_obj.e)
+    if dm is not None:
+        solvent_obj.e, solvent_obj.v = solvent_obj.kernel(dm)
+        solvent_obj.frozen = True
+
     sol_mc = CASCIWithSolvent(mc, solvent_obj, dm)
     name = solvent_obj.__class__.__name__ + mc.__class__.__name__
     return lib.set_class(sol_mc, (CASCIWithSolvent, mc.__class__), name)
@@ -1372,7 +1275,6 @@ class CASCIWithSolvent(_Solvation):
         self.__dict__.update(mc.__dict__)
         self.with_solvent = solvent
         self.dm = dm
-        #print('self.dm in CASCIWithSolvent init=', self.dm)
 
     def undo_solvent(self):
         cls = self.__class__
@@ -1401,15 +1303,12 @@ class CASCIWithSolvent(_Solvation):
 
     def get_hcore(self, mol=None):
         hcore = self._scf.get_hcore(mol)
-        #print('mc._scf=', self._scf.energy_tot())
-        print('hcore from scf in get_hcore of CASCIWithSolvent=', hcore)
         if self.with_solvent.v is not None:
             # NOTE: get_hcore was called by CASCI to generate core
             # potential.  v_solvent is added in this place to take accounts the
             # effects of solvent. Its contribution is duplicated and it
             # should be removed from the total energy.
             hcore += self.with_solvent.v
-        print('hcore in get_hcore of CASCIWithSolvent=', hcore)
         return hcore
 
     def kernel(self, mo_coeff=None, ci0=None, verbose=None):
@@ -1422,52 +1321,23 @@ class CASCIWithSolvent(_Solvation):
         log1.verbose -= 1  # Suppress a few output messages
 
         mc_base_kernel = super().kernel
-        #print('mc_base_kernel=', mc_base_kernel)
-        #log.note('CASCI base class name: %s', mc_base_kernel)
-        #log.note('CASCI base kernel method: %s', mc_base_kernel.__func__.__name__)
-
         def casci_iter_(ci0, log):
             # self.e_tot, self.e_cas, and self.ci are updated in the call
             # to super().kernel
             e_tot, e_cas, ci0 = mc_base_kernel(mo_coeff, ci0, log)[:3]
 
-            
-            #log.note('ci0 shape = %s', str(numpy.shape(ci0)))
-            #log.note('self.e_cas = %s', str(e_cas))
-            #print('self.dm in casci_iter_=', self.dm, 'len(dm)=', len(self.dm))
+
             if isinstance(self.e_cas, (float, numpy.number)):
                 dm = self.make_rdm1(ci=ci0)
-            elif isinstance(self.dm, list):
-                edups = []
-                for i in range(len(e_tot)):
-                    edup = numpy.einsum('ij,ji->', with_solvent.v, self.dm[i])
-                    edups.append(edup)
-
-                    print("e_state =", e_tot[i])
-                    #print("e_state - edup =", _e_states[i] - edup)
-
-                for i in range(len(e_tot)):
-                    e_tot[i] = e_tot[i] - edups[i] + with_solvent.e[i]
-
             else:
-                log.debug('Computing solvent responses to DM of state %d',
+                log.note('Computing solvent responses to DM of state %d',
                           with_solvent.state_id)
                 dm = self.make_rdm1(ci=ci0[with_solvent.state_id])
 
-            #print('with_solvent.e=', with_solvent.e)
-            #print('ci0.shape :', ci0)
-            #print('dm.shape from make_rdm1(ci=ci0) :', dm.shape)
                 if with_solvent.e is not None:
                     edup = numpy.einsum('ij,ji->', with_solvent.v, dm) 
-                    #print('edup=', edup)
-                    # TODO DEC29: have to understand this. 
-                    # edup is calculated only when solvent.e and solvent.v are not None 
-                    # and solvent.v is also added to hcore in get_hcore function.
-
                     self.e_tot += with_solvent.e - edup
-                
-                    # NOTE: does it require modification for state-specific calculations?
-                    #log.note('edup %s', edup)
+
 
             self.e_tot = e_tot.copy()
             if not with_solvent.frozen:
@@ -1477,21 +1347,6 @@ class CASCIWithSolvent(_Solvation):
         if with_solvent.frozen:
             with lib.temporary_env(self, _finalize=lambda:None):
                 casci_iter_(ci0, log)
-            #log.note('Total energy with solvent effects')
-
-            # Add CDS correction if SMD is used
-            #log.info(with_solvent.__class__.__name__)
-            #if getattr(with_solvent, 'method', '').upper() == 'SMD':
-            if with_solvent.__class__.__name__ == 'SMD':
-                temp_e_cds = with_solvent.get_cds()
-
-                if isinstance(temp_e_cds, numpy.ndarray):
-                    temp_e_cds = temp_e_cds[0]
-
-                self.e_tot += temp_e_cds
-                #log.info('E_cds = %s', temp_e_cds)
-                #log.info('E_tot = %s', self.e_tot)
-            #self._finalize()
 
             log.info("\n********************** (CASCI+solvent) ************************")
 
@@ -1511,39 +1366,14 @@ class CASCIWithSolvent(_Solvation):
                 e_tot, e_cas, ci0 = casci_iter_(ci0, log1)
 
                 de = e_tot - e_last
-                if isinstance(e_cas, (float, numpy.number)):
-
-                    # Add CDS correction if SMD is used
-                    if with_solvent.__class__.__name__ == 'SMD':
-                        temp_e_cds = with_solvent.get_cds()
-
-                        if isinstance(temp_e_cds, numpy.ndarray):
-                            temp_e_cds = temp_e_cds[0]
-
-                        log.info('Solvent cycle %d  E(CASCI+solvent), with CDS correction = %.15g  '
-                                'dE = %g', cycle, e_tot+temp_e_cds, de)
-                    else:
-                        log.info('Solvent cycle %d  E(CASCI+solvent) = %.15g  '
-                                 'dE = %g', cycle, e_tot, de)
+                if isinstance(e_cas, (float, numpy.number)):      
+                    log.info('Solvent cycle %d  E(CASCI+solvent) = %.15g  '
+                                'dE = %g', cycle, e_tot, de)
                 else:
-                    # Add CDS correction if SMD is used
-                    if with_solvent.__class__.__name__ == 'SMD':
-                        temp_e_cds = with_solvent.get_cds()
-
-                        if isinstance(temp_e_cds, numpy.ndarray):
-                            temp_e_cds = temp_e_cds[0]
-
-                        for i, e in enumerate(e_tot):
-                            # === CDS correction is only geometry-dependent, not state-dependent ===
-                            log.info('Solvent cycle %d  CASCI root %d  '
-                                    'E(CASCI+solvent), with CDS correction = %.15g  dE = %g',
-                                    cycle, i, e+temp_e_cds, de[i])
-
-                    else:
-                        for i, e in enumerate(e_tot):
-                            log.info('Solvent cycle %d  CASCI root %d  '
-                                     'E(CASCI+solvent) = %.15g  dE = %g',
-                                     cycle, i, e, de[i])
+                    for i, e in enumerate(e_tot):
+                        log.info('Solvent cycle %d  CASCI root %d  '
+                                'E(CASCI+solvent) = %.15g  dE = %g',
+                                cycle, i, e, de[i])
                             
                 if abs(e_tot-e_last).max() < with_solvent.conv_tol:
                     self.converged = True
@@ -1558,19 +1388,7 @@ class CASCIWithSolvent(_Solvation):
         else:
             log.info('self-consistent CASCI+solvent not converged')
         log.note('Total energy with solvent effects')
-
-        # Add CDS correction if SMD is used
-        if with_solvent.__class__.__name__ == 'SMD':
-            temp_e_cds = with_solvent.get_cds()
-
-            if isinstance(temp_e_cds, numpy.ndarray):
-                temp_e_cds = temp_e_cds[0]
-
-            self.e_tot += temp_e_cds
-            
         self._finalize()
-
-      
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
     def nuc_grad_method(self):

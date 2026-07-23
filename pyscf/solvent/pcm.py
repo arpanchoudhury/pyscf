@@ -444,7 +444,7 @@ class PCM(lib.StreamObject):
             radii_table = vdw_scale * modified_Bondi + self.r_probe/radii.BOHR
         else:
             radii_table = self.radii_table
-        logger.debug2(self, 'radii_table %s', radii_table)
+        logger.note(self, 'radii_table %s', radii_table)
         mol = self.mol
         if ng is None:
             ng = gen_grid.LEBEDEV_ORDER[self.lebedev_order]
@@ -668,150 +668,169 @@ class PCM(lib.StreamObject):
                 vmat[i] += -numpy.einsum('ijL,L->ij', v_nj, q[i,p0:p1])
         return vmat
 
-
-    def kernel(self, dm): 
-        '''A single shot solvent effects for given density matrix.
+    def solvation_type(self):
+        '''Return the solvation mode implied by the current flags.
         '''
+        if self.state_id == 0:
+            return 'gs_eq'
+        if self.state_id is None:
+            return 'sa_eq' if self.equilibrium_solvation else 'sa_neq'
+        return 'ss_eq' if self.equilibrium_solvation else 'ss_neq'
+
         
-        self._dm = dm
+    def _kernel_gs_eq(self, dm):
+        # -----------------------------------------------------
+        # Ground state equilibrium solvation
+        # -----------------------------------------------------
+        if getattr(self, 'refdm', None) is not None:
+            logger.warn(self, ''' Reference density (refdm) found in %s, without excited-state index.''', self.__class__.__name__)
 
-        if self.state_id==0:
-            # -----------------------------------------------------
-            # Ground state equilibrium solvation
-            # -----------------------------------------------------
-            if getattr(self, 'refdm', None) is not None:
-                logger.warn(self, ''' Reference density (refdm) found in %s, without excited-state index.''', self.__class__.__name__)
-
-            epcm, vmat = self._get_vind(dm)
-            logger.info(self, 'Ground state equilibrium E(pol) = %.15g', epcm)
-            return epcm, vmat
-
-        elif not self.equilibrium_solvation and isinstance(self.state_id, int) and getattr(self, 'rfroot') is None:
-            # -----------------------------------------------------
-            # State-specific excited state nonequilibrium solvation
-            # -----------------------------------------------------
+        epcm, vmat = self._get_vind(dm)
+        logger.info(self, 'Ground state equilibrium E(pol) = %.15g', epcm)
+        return epcm, vmat
 
 
-            if getattr(self, 'refdm', None) is None:
-                raise ValueError(
-                    f'set mc.with_solvent.refdm = <ground-state density matrix> ,\
-                    \n for a state-specific excited state nonequilibrium calculation')
-                
-            _q_ref_fast, _vgrid_ref = self._get_vind_pekar(self.refdm)
-            self._get_vind(self.refdm)    
-            _q_ref = self._intermediates['q_sym'] 
-            _q_ref_slow = _q_ref - _q_ref_fast                      
+    def _kernel_ss_neq(self, dm):
+        # -----------------------------------------------------
+        # State-specific excited state nonequilibrium solvation
+        # -----------------------------------------------------
+            
+        if getattr(self, 'refdm', None) is None:
+            raise RuntimeError('Reference density (refdm) must be set for state-specifc excited-state nonequilibrium solvation. '
+                        'with_solvent.refdm = <reference density matrix> (e.g. ground-state density matrix) ' \
+                        'Or use with_solvent.equilibrium_solvation = True for equilibrium solvation.')
+            
+        _q_ref_fast, _vgrid_ref = self._get_vind_pekar(self.refdm)
+        self._get_vind(self.refdm)    
+        _q_ref = self._intermediates['q_sym'] 
+        _q_ref_slow = _q_ref - _q_ref_fast                      
 
-            _q_fast, _vgrid = self._get_vind_pekar(dm)              
-            _q_neq = _q_ref_slow + _q_fast                          
+        _q_fast, _vgrid = self._get_vind_pekar(dm)              
+        _q_neq = _q_ref_slow + _q_fast                          
 
-            vmat = self._get_vmat(_q_neq)[0]
+        vmat = self._get_vmat(_q_neq)[0]
 
-            epcm_fast = 0.5 * numpy.dot(_q_fast, _vgrid)
-            epcm_slow  = numpy.dot((_vgrid - 0.5 * _vgrid_ref), _q_ref_slow)
-            epcm = epcm_fast + epcm_slow
+        epcm_fast = 0.5 * numpy.dot(_q_fast, _vgrid)
+        epcm_slow  = numpy.dot((_vgrid - 0.5 * _vgrid_ref), _q_ref_slow)
+        epcm = epcm_fast + epcm_slow
 
-            logger.info(self, 'Excited state %d nonequilibrium E(pol) = %.15g',
-                        self.state_id, epcm)
+        logger.info(self, 'Nonequilibrium SS-CASSCF: slow charges from refdm,\n'
+                          '                          fast charges from state %d', self.state_id)
+        logger.info(self, ' state %d nonequilibrium E(pol) = %.15g',
+                    self.state_id, epcm)
 
-            return epcm, vmat
+        return epcm, vmat
         
-        elif (not self.equilibrium_solvation and 
-              self.state_id is None): 
-            # ------------------------------------------
-            # State-averaged nonequilibrium solvation
-            # ------------------------------------------
+    def _kernel_ss_eq(self, dm):
+        # -----------------------------------------------------
+        # Excited state equilibrium solvation
+        # -----------------------------------------------------
+       
+        epcm, vmat = self._get_vind(dm)
+        logger.info(self, 'Equilibrium SS-CASSCF: total charges from state %d', self.state_id)
+        logger.info(self, ' state %d equilibrium E(pol) = %.15g',
+                    self.state_id, epcm)
+        return epcm, vmat
 
-            if getattr(self, 'rfroot', None) is None:
-                raise RuntimeError('State-averaged CASSCF with solvent requires '
+
+    def _kernel_sa_neq(self, dm):
+        # ------------------------------------------
+        # State-averaged nonequilibrium solvation
+        # ------------------------------------------
+
+        if getattr(self, 'rfroot', None) is None:
+            raise RuntimeError('State-averaged CASSCF with solvent requires '
                            'with_solvent.rfroot to be set')
-            phi = self.rfroot
+        phi = self.rfroot
 
-            _sa_dm    = dm[-1]
-            state_dms = dm[:-1]
-            n_states  = len(state_dms)
+        _sa_dm    = dm[-1]
+        state_dms = dm[:-1]
+        n_states  = len(state_dms)
 
            
-            if phi >= n_states:
-                raise ValueError(
-                    f'rfroot={phi} out of range for {n_states} SA states.')
-
+        if phi >= n_states:
+            raise ValueError(
+                f'rfroot={phi} out of range for {n_states} SA states.')
             
-            # slow charges from state 0 
-            self._get_vind(state_dms[0]) 
-            _q0_total = self._intermediates['q_sym']
-            _vgrid0 = self._intermediates['v_grids']
-            _q0_fast, _ = self._get_vind_pekar(state_dms[0])
-            _q0_slow = _q0_total - _q0_fast   
+        # slow charges from state 0 
+        self._get_vind(state_dms[0]) 
+        _q0_total = self._intermediates['q_sym']
+        _vgrid0 = self._intermediates['v_grids']
+        _q0_fast, _ = self._get_vind_pekar(state_dms[0])
+        _q0_slow = _q0_total - _q0_fast   
             
+        # fast charges from state rfroot 
+        _qphi_fast, _ = self._get_vind_pekar(state_dms[phi])
 
-            # fast charges from state rfroot 
-            _qphi_fast, _ = self._get_vind_pekar(state_dms[phi])
+        slow_self = -0.5 * numpy.dot(_vgrid0, _q0_slow)
 
+        logger.info(self, 'Nonequilibrium SA-CASSCF: slow charges from state 0,\n'
+                          '                          fast charges from state %d', phi)
 
-            slow_self = -0.5 * numpy.dot(_vgrid0, _q0_slow)
+        # reaction field from total NEQ charge = Q^slow(0) + Q^fast(phi)
+        _q_neq  = _q0_slow + _qphi_fast 
+        vmat = self._get_vmat(_q_neq)[0]
 
-            logger.info(self, 'Nonequilibrium SA-CASSCF: slow charges from ground state,\n'
-                              '                          fast charges from state %d', phi)
+        # per-state free energies
+        epcms = []
+        for i, d in enumerate(state_dms):
+            if i == 0:
+                # G_0 
+                epcm_i = 0.5 * numpy.dot(_vgrid0, _q0_total)
+                logger.info(self, ' state %d equilibrium E(pol) =  %.15g', i, epcm_i)
 
-            # reaction field from total NEQ charge = Q^slow(0) + Q^fast(phi)
-            _q_neq  = _q0_slow + _qphi_fast 
+            else:
+                # G_k : for state > 0
+                _qk_fast, _vgrid_k = self._get_vind_pekar(d)                  
+                fast_self_k  = 0.5 * numpy.dot(_vgrid_k, _qk_fast)               
 
-            vmat = self._get_vmat(_q_neq)[0]
-
-            # per-state free energies
-            epcms = []
-            for i, d in enumerate(state_dms):
-
-                if i == 0:
-                    # G_0 
-                    epcm_i = 0.5 * numpy.dot(_vgrid0, _q0_total)
-                    logger.info(self, 'Ground state equilibrium E(pol) =  %.15g', epcm_i)
-
-
-                else:
-                    # G_k : general formula for state > 0
-                    _qk_fast, _vgrid_k = self._get_vind_pekar(state_dms[phi])                 
-                    fast_self_k  = 0.5 * numpy.dot(_vgrid_k, _qk_fast)               
-
-                    slow_inter_k = numpy.dot(_vgrid_k, _q0_slow)                     
-
-                    epcm_i = fast_self_k + slow_inter_k + slow_self
+                slow_inter_k = numpy.dot(_vgrid_k, _q0_slow)                     
+                epcm_i = fast_self_k + slow_inter_k + slow_self
                     
-                    logger.info(self, 'Excited state %d nonequilibrium E(pol) = %.15g \n', i, epcm_i)
-                epcms.append(epcm_i)
+                logger.info(self, ' state %d nonequilibrium E(pol) = %.15g', i, epcm_i)
+            epcms.append(epcm_i)
 
-            return epcms, vmat
+        return epcms, vmat
  
 
-        elif (self.equilibrium_solvation and 
-              self.state_id is None):
-            # ------------------------------------------
-            # SA-CASSCF equilibrium solvation
-            # ------------------------------------------
+    def _kernel_sa_eq(self, dm):
+        # ------------------------------------------
+        # SA-CASSCF equilibrium solvation
+        # ------------------------------------------            
+
+        if getattr(self, 'rfroot', None) is None:
+            raise RuntimeError('State-averaged CASSCF with solvent requires '
+                        'with_solvent.rfroot to be set')
             
+        state_dms = dm[:-1]
+        phi = self.rfroot
 
-            if getattr(self, 'rfroot', None) is None:
-                raise RuntimeError('State-averaged CASSCF with solvent requires '
-                           'with_solvent.rfroot to be set')
-            
-            state_dms = dm[:-1]
-            phi = self.rfroot
+        logger.info(self, 'Equilibrium SA-CASSCF: total charges from state %d', phi)
+        # Compute equilibrium charges from the selected state
+        _, vmat = self._get_vind(state_dms[phi]) 
  
-            # Compute equilibrium charges from the selected state
-            _, vmat = self._get_vind(state_dms[phi]) 
+        # Per-state free energies:
+        epcms = []
+        for i, d in enumerate(state_dms):
+            epcm_k, _ = self._get_vind(d) 
+            epcms.append(epcm_k)              
+            logger.info(self, ' state %d equilibrium E(pol) = %.15g', i, epcm_k)
  
-            # Per-state free energies:
-            epcms = []
-            for i, d in enumerate(state_dms):
-                epcm_k, _ = self._get_vind(d) 
-                epcms.append(epcm_k)
-                
-                logger.info(self, 'State %d equilibrium E(pol) = %.15g', i, epcm_k)
- 
-            return epcms, vmat
+        return epcms, vmat
 
-
+    def kernel(self, dm):
+        self._dm = dm
+        mode = self.solvation_type()
+        logger.debug(self, 'PCM solvation mode: %s', mode)
+        _kernel = getattr(self, '_kernel_' + mode, None)
+        if _kernel is None:
+            raise NotImplementedError(
+                f'PCM not implemented for {mode!r} '
+                f'(state_id={self.state_id}, '
+                f'equilibrium_solvation={self.equilibrium_solvation}, '
+                f'refdm={getattr(self, "refdm", None) is not None}, '
+                f'rfroot={getattr(self, "rfroot", None)})')
+        return _kernel(dm)
 
 
     def nuc_grad_method(self, grad_method):
