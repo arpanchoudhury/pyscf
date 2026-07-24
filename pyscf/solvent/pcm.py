@@ -723,7 +723,7 @@ class PCM(lib.StreamObject):
         
     def _kernel_ss_eq(self, dm):
         # -----------------------------------------------------
-        # Excited state equilibrium solvation
+        # State-specific excited state equilibrium solvation
         # -----------------------------------------------------
        
         epcm, vmat = self._get_vind(dm)
@@ -735,32 +735,28 @@ class PCM(lib.StreamObject):
 
     def _kernel_sa_neq(self, dm):
         # ------------------------------------------
-        # State-averaged nonequilibrium solvation
+        # SA-CASSCF nonequilibrium solvation
         # ------------------------------------------
 
         if getattr(self, 'rfroot', None) is None:
             raise RuntimeError('State-averaged CASSCF with solvent requires '
                            'with_solvent.rfroot to be set')
         phi = self.rfroot
-
-        _sa_dm    = dm[-1]
-        state_dms = dm[:-1]
-        n_states  = len(state_dms)
-
-           
+        n_states  = len(dm)
+          
         if phi >= n_states:
             raise ValueError(
                 f'rfroot={phi} out of range for {n_states} SA states.')
             
         # slow charges from state 0 
-        self._get_vind(state_dms[0]) 
+        self._get_vind(dm[0]) 
         _q0_total = self._intermediates['q_sym']
         _vgrid0 = self._intermediates['v_grids']
-        _q0_fast, _ = self._get_vind_pekar(state_dms[0])
+        _q0_fast, _ = self._get_vind_pekar(dm[0])
         _q0_slow = _q0_total - _q0_fast   
             
         # fast charges from state rfroot 
-        _qphi_fast, _ = self._get_vind_pekar(state_dms[phi])
+        _qphi_fast, _ = self._get_vind_pekar(dm[phi])
 
         slow_self = -0.5 * numpy.dot(_vgrid0, _q0_slow)
 
@@ -773,7 +769,7 @@ class PCM(lib.StreamObject):
 
         # per-state free energies
         epcms = []
-        for i, d in enumerate(state_dms):
+        for i, d in enumerate(dm):
             if i == 0:
                 # G_0 
                 epcm_i = 0.5 * numpy.dot(_vgrid0, _q0_total)
@@ -802,16 +798,15 @@ class PCM(lib.StreamObject):
             raise RuntimeError('State-averaged CASSCF with solvent requires '
                         'with_solvent.rfroot to be set')
             
-        state_dms = dm[:-1]
         phi = self.rfroot
 
         logger.info(self, 'Equilibrium SA-CASSCF: total charges from state %d', phi)
         # Compute equilibrium charges from the selected state
-        _, vmat = self._get_vind(state_dms[phi]) 
+        _, vmat = self._get_vind(dm[phi]) 
  
         # Per-state free energies:
         epcms = []
-        for i, d in enumerate(state_dms):
+        for i, d in enumerate(dm):
             epcm_k, _ = self._get_vind(d) 
             epcms.append(epcm_k)              
             logger.info(self, ' state %d equilibrium E(pol) = %.15g', i, epcm_k)

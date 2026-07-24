@@ -287,12 +287,9 @@ class MCPDFTWithSolvent(_Solvation):
         if isinstance(self.fcisolver, StateAverageFCISolver):
             mc_obj = self._mc_class(self._scf, self.ncas, self.nelecas).state_average_(self.weights)
         else:
-            print('mc_obj is not state_average')
             mc_obj = self._mc_class(self._scf, self.ncas, self.nelecas)
 
-
         mc_obj.__dict__.update(self.__dict__)
-        
         mc_obj = _for_casscf(mc_obj, self.with_solvent, dm=None)    
 
         mc_obj.__class__ = type(mc_obj.__class__.__name__, (mc_obj.__class__,),
@@ -302,10 +299,8 @@ class MCPDFTWithSolvent(_Solvation):
         with _mcscf_env(self):
             self.e_mcscf, self.e_cas, self.ci, self.mo_coeff, self.mo_energy = mc_obj.kernel()  
 
-
         if isinstance(self.fcisolver, StateAverageFCISolver):
             self._final_state_dms = mc_obj._final_state_dms.copy() # keep it for later use (may be not needed any more)
-
 
         return self.e_mcscf, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
@@ -472,7 +467,6 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
         return self
 
 
-
     def reset(self, mol=None):
         self.with_solvent.reset(mol)
         return super().reset(mol)
@@ -494,9 +488,7 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                         
             from pyscf.mcscf.addons import StateAverageFCISolver
             if isinstance(self.fcisolver, StateAverageFCISolver):
-  
                 _sa_casdms = StateAverageFCISolver.states_make_rdm1(self.fcisolver, fcivec, self.ncas, self.nelecas)
-            
                 dm = []
                 for _sa_casdm in _sa_casdms:
                     mocore = mo[:,:self.ncore]
@@ -504,11 +496,6 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                     _sa_1rdm = numpy.dot(mocore, mocore.conj().T) * 2
                     _sa_1rdm = _sa_1rdm + reduce(numpy.dot, (mocas, _sa_casdm, mocas.conj().T))
                     dm.append(_sa_1rdm)
-
-                sa_dm = sum([w * d for w, d in zip(self.weights,dm)])
-                dm.append(sa_dm) # add the sa_dm to the end of the list for later use in solvent.kernel()
-
-                
             else:
                 # Code to mimic dm = self.make_rdm1(ci=fcivec)
                 mocore = mo[:,:self.ncore]
@@ -516,11 +503,8 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                 dm = reduce(numpy.dot, (mocas, casdm1, mocas.T))
                 dm += numpy.dot(mocore, mocore.T) * 2
 
-
             with_solvent.e, with_solvent.v = with_solvent.kernel(dm) 
                                                                  
-
-
         return casdm1, casdm2, gci, fcivec
 
 # Solvent Potential should be added to the effective potential. However, there
@@ -570,11 +554,9 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
 
         self.mo_coeff = mo_coeff 
 
-
+        with_solvent = self.with_solvent 
         from pyscf.mcscf.addons import StateAverageFCISolver
-
         if isinstance(self.fcisolver, StateAverageFCISolver):
-
             self._e_tot_without_solvent = e_tot
             _sa_casdms = StateAverageFCISolver.states_make_rdm1(self.fcisolver, fcivec, self.ncas, self.nelecas)
 
@@ -589,20 +571,12 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
             _e_states = self.e_states.copy()
             self._final_state_dms = dm.copy()
 
-
-            sa_dm = sum([w * d for w, d in zip(self.weights,dm)]) 
-            dm.append(sa_dm) # add the sa_dm to the end of the list for later use in solvent.kernel()
-
-
-            with_solvent = self.with_solvent 
-
             log.debug('Computing corrections to the total energy.')
             if with_solvent.v is not None:
                 edups = []
                 for i in range(len(_e_states)):
                     edup = numpy.einsum('ij,ji->', with_solvent.v, dm[i])
                     edups.append(edup)
-
 
                 if not with_solvent.frozen:
                     e_solv, v_solv = with_solvent.kernel(dm) 
@@ -627,7 +601,6 @@ To enable the solvent model for CASSCF, a decoration to CASSCF object as below n
                 log.info("****************************  *  *******************************\n")
 
         else:
-            with_solvent = self.with_solvent
             dm = self.make_rdm1(ci=fcivec, ao_repr=True)
             self._e_tot_without_solvent = e_tot
 
@@ -700,8 +673,6 @@ class LPDFTWithSolvent(_Solvation):
     def __init__(self, mc, solvent):
         self.__dict__.update(mc.__dict__)
         self.with_solvent = solvent
-
-        # NEQ diagonalization loop settings (Step-II of kernel()) — user-overridable
         self.lpdft_max_iter = getattr(mc, 'lpdft_max_iter', 50)
         self.lpdft_conv_tol = getattr(mc, 'lpdft_conv_tol', 1e-7)
 
@@ -814,7 +785,7 @@ class LPDFTWithSolvent(_Solvation):
 
         ncas = self.ncas
 
-        casdm1s_0, casdm2_0 = self.get_casdm12_0(ci=ci) # SA density?
+        casdm1s_0, casdm2_0 = self.get_casdm12_0(ci=ci) 
         
 
         self.veff1, self.veff2, E_ot = self.get_pdft_veff(
@@ -980,7 +951,6 @@ class LPDFTWithSolvent(_Solvation):
         v_j = self._scf.get_j(dm=dm1)
         h_eff = hyb * self._scf.get_hcore() + self.veff1 + hyb * v_j 
 
-
         h_eff += vmat  # add the solvent potential
         return h_eff
     
@@ -1113,8 +1083,6 @@ class LPDFTWithSolvent(_Solvation):
             _sa_1rdm = _sa_1rdm + reduce(numpy.dot, (mocas, _sa_casdm, mocas.conj().T))
             dm.append(_sa_1rdm)
 
-        sa_dm = sum([w * d for w, d in zip(self.weights,dm)]) 
-        dm.append(sa_dm) # add the sa_dm to the end of the list for later use in solvent.kernel()
         return dm
         
     def kernel(self, mo_coeff=None, ci0=None, ot=None, verbose=None, dump_chk=True):
@@ -1137,8 +1105,6 @@ class LPDFTWithSolvent(_Solvation):
         self.optimize_mcscf_(mo_coeff=mo_coeff, ci0=ci0)
         ci_mcscf = [c.copy() for c in self.ci]
 
-
-        
         with_solvent = self.with_solvent
         dms = self.get_solv_dms()
         _, vmat = with_solvent.kernel(dms)
@@ -1147,13 +1113,10 @@ class LPDFTWithSolvent(_Solvation):
         lpdft_conv = False
         _iter = 0
         e_tot_prev = 0.0
-        
-        
+
         # recompute solvent potential from L-PDFT states densities until convergence
         log.info("\nStarting L-PDFT+solvent iterations...")
-        while not lpdft_conv and _iter < self.lpdft_max_iter:
-
-            
+        while not lpdft_conv and _iter < self.lpdft_max_iter:            
 
             self.lpdft_ham = self.make_lpdft_ham_(
                 ot=ot, ci=ci_mcscf, vmat=vmat)  
@@ -1164,14 +1127,11 @@ class LPDFTWithSolvent(_Solvation):
                 si_pdft  = linalg.block_diag(*si_pdft)
             else:
                 e_states, si_pdft = self._eig_si(self.lpdft_ham)
-
-
                         
             self.si_pdft  = si_pdft
             self.ci = list(numpy.tensordot(si_pdft.T, numpy.asarray(ci_mcscf), axes=1))
 
-
-            # correct the free energies
+            # energy corrections
             dm = self.get_solv_dms()
             edups = []
             for i in range(len(e_states)):
@@ -1182,10 +1142,8 @@ class LPDFTWithSolvent(_Solvation):
             for i in range(len(e_states)):
                 e_states[i] = e_states[i] - edups[i] + e_solv[i]
 
-
             self.e_states = e_states
             self.e_tot    = numpy.dot(e_states, self.weights)
-
 
             lpdft_dE =abs(self.e_tot - e_tot_prev)
             _iter += 1
@@ -1200,7 +1158,6 @@ class LPDFTWithSolvent(_Solvation):
                 lpdft_conv = True
                 log.info("self-consistent L-PDFT+solvent converged")
                 
-
             e_tot_prev = self.e_tot
             vmat = v_solv
             with_solvent.v = v_solv
@@ -1234,17 +1191,12 @@ class LPDFTWithSolvent(_Solvation):
                     self.weights[i],
                     self.e_states[i],
                 )    
-
         log.info("****************************  *  *******************************\n")
-
 
     def to_gpu(self):
         obj = self.undo_solvent().to_gpu()
         obj = _for_lpdft(obj, self.with_solvent)
         return lib.to_gpu(self, obj)
-
-
-
 
 
 
@@ -1349,7 +1301,6 @@ class CASCIWithSolvent(_Solvation):
                 casci_iter_(ci0, log)
 
             log.info("\n********************** (CASCI+solvent) ************************")
-
             log.info("Energy for each state:")
             for i, ei in enumerate(self.e_tot):
                 log.info('  State %d E(CASCI+solvent) = %.15g',
